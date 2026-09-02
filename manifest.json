@@ -1,0 +1,10 @@
+{
+  "id": "kstep",
+  "name": "kSTEP Models",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.3",
+  "description": "Render kSTEP model scripts as inline previews: an isometric SVG when the model has geometry, a formatted product-structure card when it does not.",
+  "author": "Irakli Betchvaia",
+  "authorUrl": "https://kstep.dev",
+  "isDesktopOnly": true
+}

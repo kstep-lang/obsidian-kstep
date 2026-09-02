@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+        # `npm run smoke` is intentionally NOT run here: it exercises the real
+        # kstep-cli JVM binary (see scripts/smoke-test.mjs), which this
+        # runner does not have. typecheck + unit tests + a production bundle
+        # build is the CI-appropriate subset — the smoke test stays a local,
+        # manual step (see README's Development section).

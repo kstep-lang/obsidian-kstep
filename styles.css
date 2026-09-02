@@ -1,0 +1,153 @@
+.kstep-block {
+  padding: 0.5em 0;
+  overflow-x: auto;
+}
+
+/* ── Loading placeholder ──────────────────────────────────────────────────── */
+
+.kstep-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6em;
+  padding: 2em 1em;
+  color: var(--text-muted);
+}
+
+.kstep-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--background-modifier-border);
+  border-top-color: var(--interactive-accent);
+  border-radius: 50%;
+  animation: kstep-spin 0.8s linear infinite;
+}
+
+@keyframes kstep-spin {
+  to { transform: rotate(360deg); }
+}
+
+.kstep-loading-text {
+  font-size: 0.85em;
+  font-style: italic;
+}
+
+/* ── Geometry plate ───────────────────────────────────────────────────────── */
+
+/* Deliberately fixed white, NOT a theme token and NOT filter: invert(). The
+   CLI paints a hard <rect fill="#ffffff"> plus greyscale shading
+   (#626262/#858585) that encodes face lighting. Inverting flips the light
+   source — a cube then reads as a hollow. Instead: frame it like a technical
+   drawing on paper. */
+.kstep-plate {
+  background: #ffffff;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.kstep-plate svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.kstep-plate-note {
+  margin-top: 0.4em;
+  font-size: 0.85em;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* ── Summary / notice cards ───────────────────────────────────────────────── */
+
+.kstep-card {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 0.9em 1em;
+  font-size: 0.9em;
+}
+
+.kstep-card-note {
+  color: var(--text-muted);
+  font-style: italic;
+  margin-bottom: 0.6em;
+}
+
+.kstep-card-warning {
+  background-color: var(--background-modifier-error);
+  /* --text-on-accent, not --text-normal/--text-muted: some themes (verified:
+     the vault's own Catppuccin-derived theme) set --background-modifier-error
+     to a fully opaque, saturated red rather than Obsidian default's
+     translucent tint. --text-normal against that background falls well
+     short of readable contrast; --text-on-accent is the token themes define
+     specifically to stay legible on a strong colored background. */
+  color: var(--text-on-accent);
+  border-left: 4px solid var(--color-orange);
+  padding: 0.6em 0.8em;
+  border-radius: 4px;
+  margin-bottom: 0.8em;
+}
+
+.kstep-card-heading {
+  font-weight: 600;
+  margin-top: 0.8em;
+}
+
+.kstep-card-heading:first-child {
+  margin-top: 0;
+}
+
+.kstep-card-body {
+  color: var(--text-muted);
+  margin-left: 0.6em;
+}
+
+.kstep-card pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+/* ── Error display ────────────────────────────────────────────────────────── */
+
+.kstep-error {
+  background-color: var(--background-modifier-error);
+  /* See .kstep-card-warning: --text-on-accent stays legible against an
+     opaque error background, unlike --text-normal/--color-red (which can be
+     the *same* color as the background — verified in this vault's theme,
+     where both resolve to rgb(210,15,57): 1:1 contrast, invisible text). */
+  color: var(--text-on-accent);
+  border-left: 4px solid var(--color-red);
+  padding: 0.75em 1em;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.kstep-error-title {
+  display: block;
+  margin-bottom: 0.4em;
+  font-weight: 600;
+}
+
+.kstep-error pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.85em;
+}
+
+.kstep-diag-list {
+  margin: 0;
+  padding-left: 1.2em;
+}
+
+/* ── Settings tab ─────────────────────────────────────────────────────────── */
+
+.kstep-settings-warning {
+  background-color: var(--background-modifier-error);
+  color: var(--text-on-accent);
+  border-left: 4px solid var(--color-orange);
+  padding: 0.6em 0.8em;
+  border-radius: 4px;
+}

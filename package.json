@@ -1,0 +1,31 @@
+{
+  "name": "obsidian-kstep",
+  "version": "0.1.0",
+  "description": "Obsidian Community Plugin for kSTEP model preview rendering",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "smoke": "node scripts/smoke-test.mjs"
+  },
+  "keywords": [
+    "obsidian",
+    "kstep",
+    "step",
+    "cad",
+    "iso-10303"
+  ],
+  "author": "Irakli Betchvaia",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "esbuild": "^0.21.5",
+    "obsidian": "latest",
+    "typescript": "^5.4.5"
+  },
+  "allowScripts": {
+    "esbuild@0.21.5": true
+  }
+}
