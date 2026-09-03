@@ -1,7 +1,7 @@
-import { MarkdownPostProcessorContext, Platform, Plugin } from "obsidian";
+import { MarkdownPostProcessorContext, MarkdownRenderChild, Platform, Plugin } from "obsidian";
 import { DEFAULT_SETTINGS, KStepSettings } from "./src/KStepSettings";
 import { KStepSettingsTab } from "./src/KStepSettingsTab";
-import { renderViaCli } from "./src/KStepCliRenderer";
+import { renderViaCli, renderGlbViaCli } from "./src/KStepCliRenderer";
 import { RenderCache, ConcurrencyGate, cacheKey } from "./src/KStepScheduler";
 import {
   renderGeometry,
@@ -10,11 +10,18 @@ import {
   renderCliError,
   renderInvocationError,
 } from "./src/KStepCard";
+import { ViewerRegistry } from "./src/KStepGlb";
+import type { Viewer3dHandle } from "./src/KStepViewer";
+import { Kstep3dController } from "./src/Kstep3dController";
 
 export default class KStepPlugin extends Plugin {
   settings!: KStepSettings;
   private cache = new RenderCache(32);
   private gate = new ConcurrencyGate(2);
+  // Bounds simultaneously-mounted WebGL viewers across the whole plugin
+  // (not per note) — see ViewerRegistry's own doc comment in KStepGlb.ts for
+  // why a hard cap matters (silent browser-level context eviction).
+  private viewerRegistry = new ViewerRegistry<Viewer3dHandle>(4);
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -22,13 +29,39 @@ export default class KStepPlugin extends Plugin {
 
     this.registerMarkdownCodeBlockProcessor(
       "kstep",
-      async (source: string, el: HTMLElement, _ctx: MarkdownPostProcessorContext) => {
-        await this.renderBlock(source.trim(), el);
+      async (source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) => {
+        await this.renderBlock(source.trim(), el, ctx);
       },
     );
   }
 
-  private async renderBlock(source: string, el: HTMLElement): Promise<void> {
+  /** Runs the second, GLB-format CLI call — only ever invoked on explicit user action (the 3D toggle), through the same concurrency gate as the initial SVG/text render. */
+  async runGlb(source: string, cliPath: string): Promise<Awaited<ReturnType<typeof renderGlbViaCli>>> {
+    return this.gate.run(() => renderGlbViaCli(source, cliPath));
+  }
+
+  /**
+   * Registers `handle` as the most-recently-activated viewer; returns
+   * handles the LRU cap requires closing now. `onEvicted`, if given, is
+   * called later — with no arguments — if `handle` ITSELF is ever the one
+   * evicted by some future call (see `ViewerRegistry.activate`'s own doc
+   * comment); `Kstep3dController.open` uses it to fall back to the 2D poster
+   * when that happens.
+   */
+  activateViewer(handle: Viewer3dHandle, onEvicted?: () => void): Viewer3dHandle[] {
+    return this.viewerRegistry.activate(handle, onEvicted);
+  }
+
+  /** Removes `handle` from the active-viewer set (does not close it — the caller does that). */
+  releaseViewer(handle: Viewer3dHandle): void {
+    this.viewerRegistry.release(handle);
+  }
+
+  private async renderBlock(
+    source: string,
+    el: HTMLElement,
+    ctx: MarkdownPostProcessorContext,
+  ): Promise<void> {
     if (!source) return;
 
     const container = el.createDiv({ cls: "kstep-block" });
@@ -53,7 +86,7 @@ export default class KStepPlugin extends Plugin {
     const key = cacheKey(cliPath, source);
     const cached = this.cache.get(key);
     if (cached) {
-      this.paint(container, cached);
+      this.paint(container, cached, source, cliPath, ctx);
       return;
     }
 
@@ -85,7 +118,7 @@ export default class KStepPlugin extends Plugin {
     }
 
     loading.remove();
-    this.paint(container, result);
+    this.paint(container, result, source, cliPath, ctx);
 
     if (result.kind !== "invocationError") {
       this.cache.set(key, result);
@@ -102,12 +135,29 @@ export default class KStepPlugin extends Plugin {
   private paint(
     container: HTMLElement,
     result: Awaited<ReturnType<typeof renderViaCli>>,
+    source: string,
+    cliPath: string,
+    ctx: MarkdownPostProcessorContext,
   ): void {
     try {
       switch (result.kind) {
-        case "geometry":
-          renderGeometry(container, result.svg, result.json);
+        case "geometry": {
+          const controller = new Kstep3dController(this, source, cliPath);
+          let childRegistered = false;
+          renderGeometry(container, result.svg, result.json, (host, poster, resetToPoster) => {
+            if (!childRegistered) {
+              childRegistered = true;
+              // `MarkdownRenderChild`'s own unload detection watches
+              // `host` (its `containerEl`) leaving the document — exactly
+              // the DOM subtree this card's viewer lives in.
+              const child = new MarkdownRenderChild(host);
+              child.onunload = () => controller.dispose();
+              ctx.addChild(child);
+            }
+            void controller.open(host, poster, resetToPoster);
+          });
           break;
+        }
         case "summary":
           renderSummary(container, result.text);
           break;

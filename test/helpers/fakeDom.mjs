@@ -11,14 +11,61 @@ export class FakeElement {
     this.className = "";
     this.textContent = "";
     this.children = [];
+    this.parent = null;
+    this.hidden = false;
+    this.attrs = {};
+    this.listeners = {};
   }
 
   createEl(tag, opts = {}) {
     const el = new FakeElement(tag);
     if (opts.cls) el.className = opts.cls;
     if (opts.text !== undefined) el.textContent = opts.text;
+    el.parent = this;
     this.children.push(el);
     return el;
+  }
+
+  setAttribute(name, value) {
+    this.attrs[name] = value;
+  }
+
+  getAttribute(name) {
+    return name in this.attrs ? this.attrs[name] : null;
+  }
+
+  /**
+   * Stand-in for `EventTarget.addEventListener`/`removeEventListener` — just
+   * enough for src/KStepCard.ts's toggle-button wiring to run headlessly.
+   * Not a real event system: no bubbling/capturing, `event` objects passed
+   * to `dispatch` below are whatever the test itself constructs.
+   */
+  addEventListener(type, handler) {
+    (this.listeners[type] ??= []).push(handler);
+  }
+
+  removeEventListener(type, handler) {
+    if (!this.listeners[type]) return;
+    this.listeners[type] = this.listeners[type].filter((h) => h !== handler);
+  }
+
+  /** Test helper: synchronously invokes every listener registered for `type`. */
+  dispatch(type, event) {
+    for (const handler of this.listeners[type] ?? []) handler(event);
+  }
+
+  /** Detaches this node from its parent's `children` — mirrors `Element.remove()`. */
+  remove() {
+    if (!this.parent) return;
+    const idx = this.parent.children.indexOf(this);
+    if (idx !== -1) this.parent.children.splice(idx, 1);
+    this.parent = null;
+  }
+
+  /** Detaches every child (without detaching `this` from its own parent) — mirrors Obsidian's `Node.prototype.empty()`. */
+  empty() {
+    for (const c of this.children) c.parent = null;
+    this.children = [];
   }
 
   createDiv(opts) {
@@ -60,6 +107,24 @@ export class FakeElement {
       out.push(...c.queryAllByClass(cls));
     }
     return out;
+  }
+
+  /** Mirrors `Element.parentElement` (an alias for `.parent` in this fake) — used by src/Kstep3dController.ts's control-button wiring. */
+  get parentElement() {
+    return this.parent;
+  }
+
+  /**
+   * Just enough of `Element.querySelector` for src/Kstep3dController.ts's
+   * control-button wiring: a single `.class-name` selector, first descendant
+   * match, depth-first. Not a general CSS selector engine.
+   */
+  querySelector(selector) {
+    const trimmed = selector.trim();
+    if (!trimmed.startsWith(".")) {
+      throw new Error(`FakeElement.querySelector only supports a single ".class" selector, got "${selector}"`);
+    }
+    return this.queryAllByClass(trimmed.slice(1))[0] ?? null;
   }
 
   /** Every non-empty textContent in this subtree, joined with spaces. */
@@ -382,6 +447,34 @@ function parseXml(str) {
  * `globalThis.DOMParser = FakeDOMParser` before calling it — see
  * test/kstep-card.test.mjs.
  */
+/**
+ * Installs (or removes) a fake `globalThis.document` whose `createElement`
+ * returns a stand-in canvas so `hasWebGl2()` (src/KStepGlb.ts) can be
+ * exercised headlessly, the same way `globalThis.DOMParser = FakeDOMParser`
+ * above lets `renderGeometry` run without a real browser. Call with
+ * `available: true/false` before a test that depends on the 3D toggle's
+ * visibility; call with no arguments (or `undefined`) to remove the fake
+ * `document` again afterwards, since `hasWebGl2()` treats "no `document`
+ * global at all" as `false` (the plugin's real Node-less runtime never hits
+ * that path — Obsidian's Electron renderer always has a real `document`).
+ */
+export function installFakeWebGl2(available) {
+  if (available === undefined) {
+    delete globalThis.document;
+    return;
+  }
+  globalThis.document = {
+    createElement(tag) {
+      if (tag !== "canvas") throw new Error(`installFakeWebGl2's fake document only supports createElement("canvas"), got "${tag}"`);
+      return {
+        getContext(type) {
+          return available && type === "webgl2" ? {} : null;
+        },
+      };
+    },
+  };
+}
+
 export class FakeDOMParser {
   parseFromString(source) {
     const doc = new FakeDomNode("#document");

@@ -45,8 +45,19 @@ jobs:
           echo "main.js size: ${SIZE} bytes"
           # Guard against accidentally bundling something heavy (e.g. the
           # @codemirror/* packages marked external in esbuild.config.mjs).
-          if [ "$SIZE" -gt 500000 ]; then
-            echo "ERROR: main.js > 500 KB — an external dependency may have been bundled"
+          #
+          # Raised from 500 KB to 800 KB in the GLB-3D-viewer wave: three.js
+          # (0.183.2) + its GLTFLoader/OrbitControls examples are now a
+          # legitimate bundled dependency (esbuild.config.mjs does not mark
+          # `three` external — it is deliberately shipped in main.js so the
+          # plugin never needs a runtime CDN fetch, see that wave's
+          # implementation report §1). Verified minified production size at
+          # the time of this change: 631,696 bytes — 800 KB leaves headroom
+          # for normal three.js patch bumps without moving this gate again,
+          # while still catching a genuinely new heavy dependency getting
+          # bundled by accident.
+          if [ "$SIZE" -gt 800000 ]; then
+            echo "ERROR: main.js > 800 KB — an unexpected dependency may have been bundled"
             exit 1
           fi
 

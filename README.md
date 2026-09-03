@@ -3,7 +3,9 @@
 Obsidian Community Plugin that renders `kstep` code blocks — kSTEP model
 scripts (`.kstep.kts`) — as inline previews:
 
-- an isometric SVG when the model has geometry,
+- an isometric SVG when the model has geometry, with an optional interactive
+  3D viewer (orbit/zoom, WebGL2 via three.js) one click away for models with
+  triangles to show,
 - a formatted product-structure card when it does not (e.g. an assembly of
   parts with no shapes of its own),
 - a text fallback with a clear explanation when geometry exists but could not
@@ -19,9 +21,20 @@ diagrams.
 
 ## Status
 
-Early scaffold (V0.1.0). Desktop-only — `kstep-cli` runs on the JVM, so this
+Early scaffold (V0.2.0). Desktop-only — `kstep-cli` runs on the JVM, so this
 plugin is not available on mobile. Not yet published to the Community Plugin
 store.
+
+## 3D viewer
+
+A geometry card whose model has a non-zero triangle count shows a **3D**
+toggle button. Clicking it runs a second, GLB-format `kstep-cli` render and
+mounts an interactive three.js viewer (orbit-only — no pan, no zoom via the
+mouse wheel alone; hold Ctrl/Cmd + scroll to zoom, or use the on-screen +/−/
+reset controls) in place of the static SVG poster. Requires WebGL2; the
+button does not appear at all on a machine without it. Toggling back to 2D,
+and back to 3D again, does not re-run the CLI — the GLB buffer and the
+mounted viewer are kept for as long as the block stays in the document.
 
 ## Security
 

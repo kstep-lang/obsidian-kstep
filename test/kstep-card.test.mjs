@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadModule } from "./helpers/loadModule.mjs";
-import { FakeElement, FakeDOMParser } from "./helpers/fakeDom.mjs";
+import { FakeElement, FakeDOMParser, installFakeWebGl2 } from "./helpers/fakeDom.mjs";
 
 // src/KStepCard.ts's renderGeometry calls the browser global `new
 // DOMParser()` — real in Obsidian's Electron runtime, absent in plain Node.
@@ -10,8 +10,15 @@ import { FakeElement, FakeDOMParser } from "./helpers/fakeDom.mjs";
 // it here at top level, ahead of every test in this file, is sufficient.
 globalThis.DOMParser = FakeDOMParser;
 
-const { parseCardText, renderGeometry, renderCliError, renderSummary, renderNotice, renderInvocationError } =
-  await loadModule("src/KStepCard.ts");
+const {
+  parseCardText,
+  renderGeometry,
+  renderCliError,
+  renderSummary,
+  renderNotice,
+  renderInvocationError,
+  renderViewerError,
+} = await loadModule("src/KStepCard.ts");
 
 // ── parseCardText ────────────────────────────────────────────────────────
 
@@ -432,4 +439,159 @@ test("renderInvocationError: shows the title and detail verbatim", () => {
   renderInvocationError(container, "kSTEP CLI not found: /bin/kstep-cli", "Set the path in Settings.");
   assert.ok(container.allText().includes("kSTEP CLI not found: /bin/kstep-cli"));
   assert.ok(container.allText().includes("Set the path in Settings."));
+});
+
+// ── renderGeometry: the 3D toggle button ────────────────────────────────
+// Design report §3.1: button visibility is decided from the SVG-run JSON's
+// `geometry.meshTriangleCount` (blockOffersViewer), NOT `glb.triangleCount`
+// (which this JSON never carries at all).
+
+const simpleSvg = '<svg width="10" height="10"><polygon points="0,0 1,1 1,0"/></svg>';
+
+function geometryJsonWithMesh(meshTriangleCount) {
+  return { content: "geometry", geometry: { detected: true, shapeCount: 1, meshTriangleCount } };
+}
+
+test("renderGeometry: without onOpen3d, no 3D toggle button appears (bestandsschutz — existing behaviour unchanged)", () => {
+  installFakeWebGl2(true);
+  try {
+    const container = new FakeElement("div");
+    renderGeometry(container, simpleSvg, geometryJsonWithMesh(12));
+    assert.equal(container.queryAllByClass("kstep-3d-toggle").length, 0);
+  } finally {
+    installFakeWebGl2();
+  }
+});
+
+test("renderGeometry: with onOpen3d + geometry JSON (meshTriangleCount > 0) + WebGL2 available, exactly one 3D toggle button appears", () => {
+  installFakeWebGl2(true);
+  try {
+    const container = new FakeElement("div");
+    renderGeometry(container, simpleSvg, geometryJsonWithMesh(12), () => {});
+    const buttons = container.queryAllByClass("kstep-3d-toggle");
+    assert.equal(buttons.length, 1);
+    assert.equal(buttons[0].textContent, "3D");
+  } finally {
+    installFakeWebGl2();
+  }
+});
+
+test("renderGeometry: with onOpen3d but WebGL2 unavailable, no 3D toggle button appears", () => {
+  installFakeWebGl2(false);
+  try {
+    const container = new FakeElement("div");
+    renderGeometry(container, simpleSvg, geometryJsonWithMesh(12), () => {});
+    assert.equal(container.queryAllByClass("kstep-3d-toggle").length, 0);
+  } finally {
+    installFakeWebGl2();
+  }
+});
+
+test("renderGeometry: with onOpen3d but meshTriangleCount === 0, no 3D toggle button appears", () => {
+  installFakeWebGl2(true);
+  try {
+    const container = new FakeElement("div");
+    renderGeometry(container, simpleSvg, geometryJsonWithMesh(0), () => {});
+    assert.equal(container.queryAllByClass("kstep-3d-toggle").length, 0);
+  } finally {
+    installFakeWebGl2();
+  }
+});
+
+test("renderGeometry: clicking the 3D toggle calls onOpen3d(host, poster) exactly once and flips the label to 2D", () => {
+  installFakeWebGl2(true);
+  try {
+    const container = new FakeElement("div");
+    let calls = [];
+    renderGeometry(container, simpleSvg, geometryJsonWithMesh(12), (host, poster) => {
+      calls.push({ host, poster });
+    });
+    const [toggle] = container.queryAllByClass("kstep-3d-toggle");
+    const [host] = container.queryAllByClass("kstep-viewer");
+    const [plate] = container.queryAllByClass("kstep-plate");
+
+    toggle.dispatch("click");
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].host, host);
+    assert.equal(calls[0].poster, plate);
+    assert.equal(toggle.textContent, "2D");
+    assert.equal(host.hidden, false);
+    assert.equal(plate.hidden, true);
+  } finally {
+    installFakeWebGl2();
+  }
+});
+
+test("renderGeometry: toggling back to 2D does not call onOpen3d again and restores the poster", () => {
+  installFakeWebGl2(true);
+  try {
+    const container = new FakeElement("div");
+    let calls = 0;
+    renderGeometry(container, simpleSvg, geometryJsonWithMesh(12), () => {
+      calls++;
+    });
+    const [toggle] = container.queryAllByClass("kstep-3d-toggle");
+    const [host] = container.queryAllByClass("kstep-viewer");
+    const [plate] = container.queryAllByClass("kstep-plate");
+
+    toggle.dispatch("click"); // -> 3D
+    toggle.dispatch("click"); // -> back to 2D
+
+    assert.equal(calls, 1, "onOpen3d must not be called again when switching back to 2D");
+    assert.equal(toggle.textContent, "3D");
+    assert.equal(host.hidden, true);
+    assert.equal(plate.hidden, false);
+  } finally {
+    installFakeWebGl2();
+  }
+});
+
+test("renderGeometry: onOpen3d + summary content never shows a 3D toggle (blockOffersViewer requires content === 'geometry')", () => {
+  installFakeWebGl2(true);
+  try {
+    const container = new FakeElement("div");
+    const json = { content: "summary", geometry: { detected: false, shapeCount: 1, meshTriangleCount: 12 } };
+    renderGeometry(container, simpleSvg, json, () => {});
+    assert.equal(container.queryAllByClass("kstep-3d-toggle").length, 0);
+  } finally {
+    installFakeWebGl2();
+  }
+});
+
+// ── renderViewerError ────────────────────────────────────────────────────
+
+test("renderViewerError: paints a title and detail into the given host", () => {
+  const host = new FakeElement("div");
+  renderViewerError(host, "Could not display the 3D model", "Something went wrong.");
+  const titles = host.queryAllByClass("kstep-error-title").map((el) => el.textContent);
+  assert.deepEqual(titles, ["Could not display the 3D model"]);
+  assert.ok(host.allText().includes("Something went wrong."));
+});
+
+test("renderViewerError: does not touch a sibling poster element", () => {
+  const wrap = new FakeElement("div");
+  const poster = wrap.createDiv({ cls: "kstep-plate" });
+  poster.createEl("svg", {});
+  const host = wrap.createDiv({ cls: "kstep-viewer" });
+
+  renderViewerError(host, "title", "detail");
+
+  assert.equal(poster.queryAll("svg").length, 1, "the poster's own content must be untouched");
+});
+
+// ── Regression: summary/notice/cliError never produce a 3D-related button ──
+
+test("renderSummary/renderNotice/renderCliError: never emit any <button> (geometry-only feature)", () => {
+  const c1 = new FakeElement("div");
+  renderSummary(c1, "Model\n    name: Widget");
+  assert.equal(c1.queryAll("button").length, 0);
+
+  const c2 = new FakeElement("div");
+  renderNotice(c2, "Model\n    name: Widget", { fallbackReason: "occt_unavailable", geometry: {}, occt: {} });
+  assert.equal(c2.queryAll("button").length, 0);
+
+  const c3 = new FakeElement("div");
+  renderCliError(c3, { status: "error", command: "render", errorKind: "io_error", message: "boom" });
+  assert.equal(c3.queryAll("button").length, 0);
 });

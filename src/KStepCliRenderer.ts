@@ -1,4 +1,4 @@
-import type { KStepJson, KStepRenderResult } from "./KStepResult";
+import type { KStepGlbResult, KStepJson, KStepRenderResult } from "./KStepResult";
 
 /**
  * No `obsidian` import in this file, deliberately (unlike obsidian-kuml's
@@ -64,6 +64,18 @@ const MAX_SCRIPT_BYTES = 1024 * 1024;
  * *count*, not bytes) — enough to freeze or OOM Obsidian from a single note.
  */
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Upper bound on a `-f glb` render's output FILE, deliberately separate from
+ * (and larger than) `MAX_OUTPUT_BYTES` above. A GLB buffer is denser per
+ * triangle than an SVG: not indexed, POSITION + NORMAL, float32 — at OCCT's
+ * own `MAX_TRIANGLES` ceiling of 130,000 that works out to
+ * 130,000 × 3 verts × 2 attrs × 3 floats × 4 bytes ≈ 8.93 MiB, already over
+ * the SVG limit for a perfectly legitimate maximal model. 16 MiB leaves
+ * headroom above that real ceiling instead of rejecting a valid render at an
+ * arbitrary boundary.
+ */
+const MAX_GLB_BYTES = 16 * 1024 * 1024;
 
 /**
  * Extracts the trailing JSON document from kstep-cli's stdout.
@@ -561,6 +573,203 @@ export async function renderViaCli(source: string, cliPath: string): Promise<KSt
                 kind: "invocationError",
                 title: "kSTEP CLI timed out",
                 detail: "The render call did not finish within 60 seconds.",
+              });
+              return;
+            }
+            const detail =
+              filterStderr(stderr ?? "") || (error ? error.message : "kstep-cli produced no output.");
+            resolve({ kind: "invocationError", title: "kSTEP CLI invocation failed", detail });
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            resolve({
+              kind: "invocationError",
+              title: "kSTEP CLI produced an unexpected result",
+              detail: msg,
+            });
+          }
+        },
+      );
+    });
+  } finally {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // best-effort cleanup
+    }
+  }
+}
+
+/**
+ * Renders a kSTEP script's geometry as a binary glTF (GLB) buffer, by
+ * invoking the kstep-cli binary a SECOND time with `-f glb` forced. This is
+ * NEVER called as part of the initial block render (that stays exactly the
+ * `-f auto` SVG/text call in `renderViaCli` above, unchanged) — only on
+ * explicit user action, when the "3D" toggle is clicked (see main.ts).
+ *
+ * Structurally a close mirror of `renderViaCli` (same mkdtemp/writeFileSync/
+ * execFile/finally-rmSync shape, same `extractJson`/`filterStderr` reuse),
+ * with these deliberate differences:
+ *
+ *  - `-f glb` is passed explicitly, so `RenderFormat.fromExtension`'s
+ *    extension-based resolution never runs — `-o` still has no extension of
+ *    its own (kept for consistency with `renderViaCli`; irrelevant here
+ *    since the format is forced).
+ *  - `--require-geometry` is still deliberately NOT set: a model with zero
+ *    triangles (e.g. product-structure-only, or a fallback-to-notice case)
+ *    comes back as a valid, tiny, zero-triangle GLB rather than a hard CLI
+ *    error — rejected here by `shouldOfferViewer`/`blockOffersViewer`
+ *    (KStepGlb.ts), not by exit code.
+ *  - The output file is read as a `Buffer` (no `"utf-8"` encoding — a GLB is
+ *    binary), then copied into a freshly allocated `ArrayBuffer` via
+ *    `slice(byteOffset, byteOffset + byteLength)`. This copy is required, not
+ *    optional: Node's `Buffer.buffer` frequently points into a larger, SHARED
+ *    pool `ArrayBuffer` (`Buffer.poolSize`-backed allocations), so handing
+ *    `buf.buffer` straight to `GLTFLoader.parse` would leak unrelated pool
+ *    bytes into the parser and, over the buffer's read range, potentially
+ *    read memory reused by an unrelated, later `Buffer` allocation.
+ *  - Size ceiling is `MAX_GLB_BYTES` (16 MiB), not `MAX_OUTPUT_BYTES`.
+ *  - `json.format !== "glb"` is rejected as an `invocationError` — the CLI
+ *    wrote something other than what was asked for.
+ */
+export async function renderGlbViaCli(source: string, cliPath: string): Promise<KStepGlbResult> {
+  // See renderViaCli's identical comment above for why `eval("require")`.
+  // eslint-disable-next-line no-eval
+  const req = eval("require") as NodeRequire;
+  const childProcess = req("child_process") as typeof import("child_process");
+  const fs = req("fs") as typeof import("fs");
+  const os = req("os") as typeof import("os");
+  const path = req("path") as typeof import("path");
+
+  const sourceBytes = Buffer.byteLength(source, "utf8");
+  if (sourceBytes > MAX_SCRIPT_BYTES) {
+    return {
+      kind: "invocationError",
+      title: "kSTEP block too large",
+      detail: `kSTEP blocks are limited to ${MAX_SCRIPT_BYTES} bytes (1 MiB); this block is ${sourceBytes} bytes.`,
+    };
+  }
+
+  let dir: string;
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "obsidian-kstep-"));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { kind: "invocationError", title: "Could not create a temp directory", detail: msg };
+  }
+
+  const inFile = path.join(dir, "block.kstep.kts");
+  const outFile = path.join(dir, "out");
+
+  try {
+    try {
+      // Same 0700-dir + 0600-file + wx double-hardening as renderViaCli.
+      fs.writeFileSync(inFile, source, { encoding: "utf-8", mode: 0o600, flag: "wx" });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { kind: "invocationError", title: "Could not write a temp file", detail: msg };
+    }
+
+    const args = ["render", inFile, "-f", "glb", "-o", outFile, "--output", "json"];
+
+    // eslint-disable-next-line no-async-promise-executor
+    return await new Promise<KStepGlbResult>((resolve) => {
+      childProcess.execFile(
+        cliPath,
+        args,
+        {
+          timeout: 60_000,
+          maxBuffer: 5 * 1024 * 1024,
+          // Same reasoning as renderViaCli: SIGKILL, not the SIGTERM default,
+          // because a JVM stuck inside a native OCCT call can never get
+          // around to handling SIGTERM, and the `finally` block below deletes
+          // its temp directory out from under it regardless.
+          killSignal: "SIGKILL",
+        },
+        (err, stdout, stderr) => {
+          // Same defence-in-depth reasoning as renderViaCli's callback: this
+          // runs inside a `new Promise` executor with no other catch around
+          // it, so an escaping exception here would hang the returned
+          // promise forever rather than surface as an ordinary result.
+          try {
+            const error = err as ExecFileError | null;
+
+            if (error && error.code === "ENOENT") {
+              resolve({
+                kind: "invocationError",
+                title: `kSTEP CLI not found: ${cliPath}`,
+                detail:
+                  "Set the path in Settings → kSTEP Models. The binary is called kstep-cli in a " +
+                  "Gradle installDist build (kstep-cli/build/install/kstep-cli/bin/kstep-cli), " +
+                  "or kstep if installed via a package manager.",
+              });
+              return;
+            }
+
+            const json = extractJson(stdout ?? "");
+            if (json) {
+              if (json.status === "error") {
+                resolve({
+                  kind: "invocationError",
+                  title: "kSTEP CLI could not produce a 3D model",
+                  detail:
+                    json.errorKind === "geometry_unavailable"
+                      ? json.fallbackReason
+                      : "The 3D render failed. See the 2D preview's own error state for details.",
+                });
+                return;
+              }
+
+              if (json.format !== "glb") {
+                resolve({
+                  kind: "invocationError",
+                  title: "Unexpected format from kSTEP CLI",
+                  detail: `Expected format "glb", got "${json.format}".`,
+                });
+                return;
+              }
+
+              const expected = path.resolve(outFile);
+              const actual = path.resolve(json.outPath);
+              if (actual !== expected) {
+                resolve({
+                  kind: "invocationError",
+                  title: "Unexpected output path from kSTEP CLI",
+                  detail: `Expected ${expected}, got ${json.outPath}.`,
+                });
+                return;
+              }
+
+              let glb: ArrayBuffer;
+              try {
+                const stat = fs.statSync(outFile);
+                if (stat.size > MAX_GLB_BYTES) {
+                  resolve({
+                    kind: "invocationError",
+                    title: "kSTEP 3D output too large",
+                    detail: `The rendered GLB is ${stat.size} bytes, over the ${MAX_GLB_BYTES}-byte limit.`,
+                  });
+                  return;
+                }
+                const buf = fs.readFileSync(outFile);
+                // Copy out of Node's (possibly shared-pool) Buffer — see this
+                // function's doc comment above for why this slice is required,
+                // not optional.
+                glb = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                resolve({ kind: "invocationError", title: "Could not read kSTEP 3D output", detail: msg });
+                return;
+              }
+
+              resolve({ kind: "geometry3d", glb, json });
+              return;
+            }
+
+            if (error?.killed) {
+              resolve({
+                kind: "invocationError",
+                title: "kSTEP CLI timed out",
+                detail: "The 3D render did not finish within 60 seconds.",
               });
               return;
             }

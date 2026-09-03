@@ -29,6 +29,16 @@ const context = await esbuild.context({
   target: "es2018",
   logLevel: "info",
   sourcemap: prod ? false : "inline",
+  // Only for production: a dev build stays unminified so a stack trace from
+  // `npm run dev`'s watch mode points at readable source. Matters far more
+  // than it used to since this wave bundled `three` + GLTFLoader +
+  // OrbitControls — minification is what keeps the shipped main.js close to
+  // the report's own measured ~608 KB for three.js alone, rather than the
+  // ~1.3 MB an unminified bundle of the whole plugin actually is (verified
+  // this wave: minification alone took it from 1,368,577 B to well under
+  // release.yml's revised size gate — see that file's own comment for the
+  // exact before/after numbers).
+  minify: prod,
   treeShaking: true,
   outfile: "main.js",
 });

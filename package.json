@@ -1,6 +1,6 @@
 {
   "name": "obsidian-kstep",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Obsidian Community Plugin for kSTEP model preview rendering",
   "main": "main.js",
   "scripts": {
@@ -19,8 +19,12 @@
   ],
   "author": "Irakli Betchvaia",
   "license": "Apache-2.0",
+  "dependencies": {
+    "three": "0.183.2"
+  },
   "devDependencies": {
     "@types/node": "^20.14.0",
+    "@types/three": "^0.183.0",
     "esbuild": "^0.21.5",
     "obsidian": "latest",
     "typescript": "^5.4.5"

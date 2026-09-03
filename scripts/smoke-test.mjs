@@ -49,11 +49,23 @@ await esbuild.build({
   logLevel: "info",
 });
 
+const glbBundleOutfile = path.join(repoRoot, "build", "smoke", "glb.cjs");
+await esbuild.build({
+  entryPoints: [path.join(repoRoot, "src", "KStepGlb.ts")],
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  outfile: glbBundleOutfile,
+  logLevel: "info",
+});
+
 const require = createRequire(import.meta.url);
 // Bust require cache in case a previous run in the same process left an
 // entry (not expected for a fresh process, but harmless to guard).
 delete require.cache[require.resolve(bundleOutfile)];
-const { renderViaCli } = require(bundleOutfile);
+delete require.cache[require.resolve(glbBundleOutfile)];
+const { renderViaCli, renderGlbViaCli } = require(bundleOutfile);
+const { validateGlb, shouldOfferViewer } = require(glbBundleOutfile);
 
 let failures = 0;
 let passed = 0;
@@ -201,12 +213,109 @@ async function main() {
   }
   console.log("");
 
-  // ── Case 6 — temp-directory leak check ───────────────────────────────────
+  // ── Case 7 — GLB geometry render ─────────────────────────────────────────
+  console.log("Case 7: hello-box.kstep.kts (renderGlbViaCli, geometry3d)");
+  {
+    const source = readFixture("hello-box.kstep.kts");
+    const result = await renderGlbViaCli(source, CLI_PATH);
+    console.log(`  result.kind = ${result.kind}`);
+    if (result.kind === "invocationError") console.log(`  detail: ${result.detail}`);
+    check("kind === 'geometry3d'", result.kind === "geometry3d", result.kind);
+    if (result.kind === "geometry3d") {
+      const magicBytes = Buffer.from(result.glb.slice(0, 4)).toString("ascii");
+      check("GLB magic is 'glTF'", magicBytes === "glTF", magicBytes);
+      check("json.format === 'glb'", result.json.format === "glb", result.json.format);
+      check(
+        "json.glb.triangleCount === 12",
+        result.json.glb?.triangleCount === 12,
+        result.json.glb?.triangleCount,
+      );
+      check("json.glb.vertexCount === 36", result.json.glb?.vertexCount === 36, result.json.glb?.vertexCount);
+      check(
+        "json.glb.byteLength === actual buffer byteLength",
+        result.json.glb?.byteLength === result.glb.byteLength,
+        `${result.json.glb?.byteLength} vs ${result.glb.byteLength}`,
+      );
+      const validation = validateGlb(result.glb, result.json.glb?.byteLength);
+      check("validateGlb(...).ok === true", validation.ok === true, validation.ok ? "" : validation.reason);
+      check("shouldOfferViewer(json) === true", shouldOfferViewer(result.json) === true);
+    }
+  }
+  console.log("");
+
+  // ── Case 8 — GLB summary (no geometry) ───────────────────────────────────
+  console.log("Case 8: hello-assembly.kstep.kts (renderGlbViaCli, summary — no triangles)");
+  {
+    const source = readFixture("hello-assembly.kstep.kts");
+    const result = await renderGlbViaCli(source, CLI_PATH);
+    console.log(`  result.kind = ${result.kind}`);
+    if (result.kind === "invocationError") console.log(`  detail: ${result.detail}`);
+    check("kind === 'geometry3d'", result.kind === "geometry3d", result.kind);
+    if (result.kind === "geometry3d") {
+      check("json.content === 'summary'", result.json.content === "summary", result.json.content);
+      check(
+        "json.glb.triangleCount === 0",
+        result.json.glb?.triangleCount === 0,
+        result.json.glb?.triangleCount,
+      );
+      check("shouldOfferViewer(json) === false", shouldOfferViewer(result.json) === false);
+    }
+  }
+  console.log("");
+
+  // ── Case 9 — GLB notice (fallback) ───────────────────────────────────────
+  console.log("Case 9: hello-box-closed.kstep.kts (renderGlbViaCli, notice fallback)");
+  {
+    const source = readFixture("hello-box-closed.kstep.kts");
+    const result = await renderGlbViaCli(source, CLI_PATH);
+    console.log(`  result.kind = ${result.kind}`);
+    if (result.kind === "invocationError") console.log(`  detail: ${result.detail}`);
+    check("kind === 'geometry3d'", result.kind === "geometry3d", result.kind);
+    if (result.kind === "geometry3d") {
+      check(
+        "json.fallbackReason === 'shape_closed_by_script'",
+        result.json.fallbackReason === "shape_closed_by_script",
+        result.json.fallbackReason,
+      );
+      check("shouldOfferViewer(json) === false", shouldOfferViewer(result.json) === false);
+    }
+  }
+  console.log("");
+
+  // ── Case 10 — WebGL mount/embedding boundary ─────────────────────────────
+  // Deliberately NOT exercised here: mounting an actual WebGL2 context (three.js's
+  // WebGLRenderer) needs a real GPU-backed context that plain Node cannot
+  // provide, and a hand-rolled stub GL context is not a meaningful test of
+  // the real rendering path — see this wave's implementation report, "Ehrliche
+  // Testgrenze" section. KStepViewer.ts's `mountViewer` is exercised by a
+  // manual sight-test in Obsidian instead (part of this wave's acceptance,
+  // not of this automated script).
+  console.log("Case 10: WebGL mount — intentionally out of scope for this script (see report's honest test boundary)");
+  console.log("");
+
+  // ── Case 11 — CLI not found (GLB path) ───────────────────────────────────
+  console.log("Case 11: nonexistent CLI path on the GLB code path (invocationError)");
+  {
+    const source = readFixture("hello-box.kstep.kts");
+    const result = await renderGlbViaCli(source, "kstep-definitely-not-here");
+    console.log(`  result.kind = ${result.kind}`);
+    check("kind === 'invocationError'", result.kind === "invocationError", result.kind);
+    if (result.kind === "invocationError") {
+      check("title mentions 'not found'", result.title.toLowerCase().includes("not found"), result.title);
+    }
+  }
+  console.log("");
+
+  // ── Case 6 — temp-directory leak check (renderViaCli AND renderGlbViaCli) ─
+  // Runs last, after every case above (including the GLB cases 7/8/9/11,
+  // which use the same `obsidian-kstep-` mkdtemp prefix and the same
+  // finally-rmSync cleanup) — so this one check covers leaks from both CLI
+  // entry points, not just the original renderViaCli.
   console.log("Case 6: no leftover obsidian-kstep-* temp directories");
   {
     // Only entries that appeared during THIS run and are still there count
-    // as a leak from renderViaCli — pre-existing ones belong to something
-    // else (see the snapshot comment above main()).
+    // as a leak — pre-existing ones belong to something else (see the
+    // snapshot comment above main()).
     const leaked = obsidianKstepTempDirs().filter((e) => !preExistingTempDirs.has(e));
     check("no leaked temp dirs", leaked.length === 0, leaked.join(", "));
   }

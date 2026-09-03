@@ -7,7 +7,7 @@ import { loadModule } from "./helpers/loadModule.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_CLI = path.join(__dirname, "helpers", "fakeKstepCli.mjs");
 
-const { extractJson, filterStderr, renderViaCli } = await loadModule("src/KStepCliRenderer.ts");
+const { extractJson, filterStderr, renderViaCli, renderGlbViaCli } = await loadModule("src/KStepCliRenderer.ts");
 
 test("extractJson: parses a clean success object", () => {
   const stdout =
@@ -439,4 +439,93 @@ test("renderViaCli: rejects a CLI output file over MAX_OUTPUT_BYTES instead of r
     if (prevEnv === undefined) delete process.env.FAKE_KSTEP_OUTPUT_BYTES;
     else process.env.FAKE_KSTEP_OUTPUT_BYTES = prevEnv;
   }
+});
+
+// ── renderGlbViaCli (MAJOR testability finding, this wave's review — this
+// function had zero unit tests: only scripts/smoke-test.mjs exercised it,
+// and that script deliberately does NOT run in CI (needs a real kstep-cli
+// JVM install). test/helpers/fakeKstepCli.mjs's `-f glb` branch (added this
+// wave) lets these tests exercise the same real-child-process path
+// `renderViaCli`'s tests above already use, for the `-f glb` guards that are
+// this function's own: MAX_GLB_BYTES, the `json.format !== "glb"` rejection,
+// the outPath mismatch check, and — most importantly — the
+// Buffer→ArrayBuffer copy documented as a security-relevant guard in this
+// function's own doc comment (Node's `Buffer.buffer` can point into a
+// SHARED pool ArrayBuffer for small allocations). ────────────────────────
+
+function withEnv(name, value, fn) {
+  const prev = process.env[name];
+  process.env[name] = value;
+  return fn().finally(() => {
+    if (prev === undefined) delete process.env[name];
+    else process.env[name] = prev;
+  });
+}
+
+test("renderGlbViaCli: a small GLB output renders normally (fake-CLI harness sanity check)", async () => {
+  const result = await renderGlbViaCli('println("hi")', FAKE_CLI);
+  assert.equal(result.kind, "geometry3d");
+  assert.equal(result.json.format, "glb");
+  assert.equal(result.json.status, "success");
+});
+
+test("renderGlbViaCli: copies the CLI output out of Node's (possibly shared-pool) Buffer, not merely aliases it (MAJOR security regression guard)", async () => {
+  // Deliberately well under Node's default Buffer pool size (8 KiB) — this is
+  // exactly the size class for which `fs.readFileSync` backs its returned
+  // Buffer with a slice of a larger, SHARED pool ArrayBuffer. If
+  // `renderGlbViaCli` ever regressed to handing back `buf.buffer` directly
+  // (instead of `buf.buffer.slice(buf.byteOffset, buf.byteOffset +
+  // buf.byteLength)`, per its own doc comment), the returned ArrayBuffer's
+  // `byteLength` here would silently balloon to the pool's own size (or
+  // whatever remained of it) instead of staying exactly 32 — and, far worse
+  // in a real Obsidian session, `GLTFLoader.parse` would receive unrelated
+  // bytes from neighbouring allocations sharing that same pool.
+  const result = await withEnv("FAKE_KSTEP_GLB_BYTES", "32", () => renderGlbViaCli('println("hi")', FAKE_CLI));
+  assert.equal(result.kind, "geometry3d");
+  assert.equal(result.glb.byteLength, 32, "the returned ArrayBuffer must be exactly the file's own size, not a shared pool's");
+  const bytes = new Uint8Array(result.glb);
+  assert.ok(
+    bytes.every((b) => b === 0x2a),
+    "every byte must be the fake CLI's own fill value — no unrelated pool bytes leaking in",
+  );
+});
+
+test("renderGlbViaCli: rejects a GLB output file over MAX_GLB_BYTES instead of reading it whole into memory", async () => {
+  const result = await withEnv("FAKE_KSTEP_GLB_BYTES", String(17 * 1024 * 1024), () =>
+    renderGlbViaCli('println("hi")', FAKE_CLI),
+  );
+  assert.equal(result.kind, "invocationError");
+  assert.match(result.title, /too large/i);
+});
+
+test("renderGlbViaCli: a GLB output at exactly MAX_GLB_BYTES is not rejected for size (off-by-one check)", async () => {
+  const result = await withEnv("FAKE_KSTEP_GLB_BYTES", String(16 * 1024 * 1024), () =>
+    renderGlbViaCli('println("hi")', FAKE_CLI),
+  );
+  assert.equal(
+    result.kind,
+    "geometry3d",
+    `expected a GLB of exactly MAX_GLB_BYTES to pass the size guard, got: ${JSON.stringify(result).slice(0, 200)}`,
+  );
+});
+
+test("renderGlbViaCli: rejects a response whose own format field is not \"glb\"", async () => {
+  const result = await withEnv("FAKE_KSTEP_GLB_WRONG_FORMAT", "1", () => renderGlbViaCli('println("hi")', FAKE_CLI));
+  assert.equal(result.kind, "invocationError");
+  assert.match(result.title, /unexpected format/i);
+});
+
+test("renderGlbViaCli: rejects a response whose outPath does not match the requested output path", async () => {
+  const result = await withEnv("FAKE_KSTEP_GLB_WRONG_OUTPATH", "1", () =>
+    renderGlbViaCli('println("hi")', FAKE_CLI),
+  );
+  assert.equal(result.kind, "invocationError");
+  assert.match(result.title, /unexpected output path/i);
+});
+
+test("renderGlbViaCli: rejects an oversized script before ever touching the filesystem or the CLI", async () => {
+  const oversized = "x".repeat(1024 * 1024 + 1); // MAX_SCRIPT_BYTES + 1
+  const result = await renderGlbViaCli(oversized, "/definitely/does/not/exist/kstep-cli");
+  assert.equal(result.kind, "invocationError");
+  assert.match(result.title, /too large/i);
 });

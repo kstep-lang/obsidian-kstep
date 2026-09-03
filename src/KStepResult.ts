@@ -15,7 +15,7 @@
  *    this is a compile error to get wrong, not a runtime surprise.
  */
 
-export type RenderContainer = "svg" | "png" | "text";
+export type RenderContainer = "svg" | "png" | "text" | "glb";
 export type RenderContentKind = "geometry" | "summary" | "notice";
 
 export type OcctInfo =
@@ -29,8 +29,33 @@ export interface GeometryInfo {
   shapeCount: number;
   /** Present only when content === "geometry". */
   previewedShapeIndex?: number;
-  /** Present only when content === "geometry". */
+  /**
+   * 2D-projected/culled triangle count from the SVG render — present only
+   * when content === "geometry". Kept exactly as-is (meaning unchanged).
+   */
   triangleCount?: number;
+  /**
+   * Raw, un-culled world-space triangle count — present only when
+   * content === "geometry". Predicts the later `glb.triangleCount` exactly,
+   * because GlbWriter only ever drops degenerate triangles (verified against
+   * the real CLI: 12 here for hello-box vs. 6 for the 2D-culled
+   * `triangleCount` above). Used by `blockOffersViewer` (KStepGlb.ts) to
+   * decide 3D-button visibility from the SVG-run JSON, which never carries a
+   * `glb` object of its own.
+   */
+  meshTriangleCount?: number;
+}
+
+/**
+ * Present only on a success payload from a `-f glb` render — see
+ * `renderGlbViaCli` in KStepCliRenderer.ts. Absent entirely from a `-f auto`
+ * (SVG/text) run's JSON.
+ */
+export interface GlbInfo {
+  triangleCount: number;
+  vertexCount: number;
+  droppedTriangleCount: number;
+  byteLength: number;
 }
 
 export interface KStepSuccessJson {
@@ -45,6 +70,8 @@ export interface KStepSuccessJson {
   geometry: GeometryInfo;
   occt: OcctInfo;
   rootCount: number;
+  /** Present only when format === "glb" (a `renderGlbViaCli` response). */
+  glb?: GlbInfo;
 }
 
 export interface KStepDiagnostic {
@@ -118,4 +145,20 @@ export type KStepRenderResult =
   | { kind: "summary"; text: string; json: KStepSuccessJson }
   | { kind: "notice"; text: string; json: KStepSuccessJson }
   | { kind: "cliError"; json: KStepErrorJson }
+  | { kind: "invocationError"; title: string; detail: string };
+
+/**
+ * What `renderGlbViaCli` hands back — a second, independent CLI invocation
+ * only made on explicit user action (clicking the "3D" toggle), never as
+ * part of the initial block render. Deliberately NOT folded into
+ * `KStepRenderResult` above: doing so would make every existing
+ * `switch (result.kind)` over that type non-exhaustive for a case it was
+ * never meant to handle, silently (TypeScript only flags a missing case on a
+ * `switch` that is itself typed to return a value / assigned to a variable
+ * with `never` exhaustiveness checking — main.ts's `paint()` switch is a
+ * plain statement switch, so a new unhandled variant would just fall through
+ * with no compile error and no visible failure).
+ */
+export type KStepGlbResult =
+  | { kind: "geometry3d"; glb: ArrayBuffer; json: KStepSuccessJson }
   | { kind: "invocationError"; title: string; detail: string };

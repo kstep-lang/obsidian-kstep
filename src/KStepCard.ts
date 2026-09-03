@@ -1,4 +1,5 @@
 import type { KStepErrorJson, KStepSuccessJson } from "./KStepResult";
+import { blockOffersViewer, hasWebGl2 } from "./KStepGlb";
 
 /**
  * No `obsidian` import here — `createEl`/`createDiv` are available because
@@ -247,8 +248,29 @@ function sanitizeSvgDoc(doc: Document): void {
  * Renders a geometry preview: the CLI's SVG, inline (DOMParser → appendChild,
  * never innerHTML), on a fixed white "plate" — a deliberate, documented
  * exception to using only Obsidian theme tokens (see styles.css).
+ *
+ * `onOpen3d`, when provided, is main.ts's composition-root callback for
+ * mounting the (three.js-backed) 3D viewer — this module itself stays free
+ * of any `three` import, matching KStepGlb.ts (see KStepViewer.ts's own
+ * header comment for why that separation matters). Called with the viewer
+ * host element, the poster (this function's own SVG plate), and a
+ * `resetToPoster` callback every time the toggle switches INTO 3D mode;
+ * toggling back to 2D via the button itself is handled entirely locally (no
+ * callback, no CLI round trip — see the design report's card-toggle
+ * description) — `resetToPoster` exists so main.ts's `Kstep3dController` can
+ * trigger that same swap-back from OUTSIDE a click, specifically when the
+ * plugin-wide viewer LRU cap (`ViewerRegistry`, KStepGlb.ts) evicts this
+ * card's handle asynchronously, long after the toggle click that opened it
+ * (MAJOR finding, this wave's review — without this hook a card evicted this
+ * way stayed stuck on a blank, already-closed canvas with no way back to 2D
+ * short of a full note re-render).
  */
-export function renderGeometry(container: HTMLElement, svg: string, json: KStepSuccessJson): void {
+export function renderGeometry(
+  container: HTMLElement,
+  svg: string,
+  json: KStepSuccessJson,
+  onOpen3d?: (host: HTMLElement, poster: HTMLElement, resetToPoster: () => void) => void,
+): void {
   const parser = new DOMParser();
   const doc = parser.parseFromString(svg, "image/svg+xml");
   const parserError = doc.querySelector("parsererror");
@@ -285,7 +307,13 @@ export function renderGeometry(container: HTMLElement, svg: string, json: KStepS
   svgEl.removeAttribute("width");
   svgEl.removeAttribute("height");
 
-  const plate = container.createDiv({ cls: "kstep-plate" });
+  // A relatively-positioned wrapper, not `container` itself, so the 3D
+  // toggle button (absolutely positioned "top right of the card" — see
+  // styles.css's `.kstep-3d-toggle`) is placed relative to the plate rather
+  // than the whole block (which may also contain the shape-count note below
+  // it).
+  const wrap = container.createDiv({ cls: "kstep-geometry-wrap" });
+  const plate = wrap.createDiv({ cls: "kstep-plate" });
   plate.appendChild(svgEl);
 
   if (json.geometry.shapeCount > 1) {
@@ -294,6 +322,105 @@ export function renderGeometry(container: HTMLElement, svg: string, json: KStepS
       text: `Showing shape 1 of ${json.geometry.shapeCount}.`,
     });
   }
+
+  if (onOpen3d && blockOffersViewer(json) && hasWebGl2()) {
+    renderViewerToggle(wrap, plate, onOpen3d);
+  }
+}
+
+/**
+ * Builds the "3D"/"2D" toggle button plus the (initially hidden) viewer host
+ * and its three visible controls (zoom in, zoom out, reset — Kare's "no
+ * icon, a text label" rule applies only to the mode toggle itself; +/−/
+ * "Zurücksetzen" are conventional enough as bare glyphs/short words).
+ *
+ * `host` and the three control buttons are found by main.ts's `onOpen3d`
+ * implementation via their fixed classes (`.kstep-3d-zoom-in` etc.) — see
+ * that function for the wiring to a mounted `Viewer3dHandle`'s
+ * `zoomIn`/`zoomOut`/`resetView`. This module never imports KStepViewer.ts
+ * (which would pull `three` into this file's own bundle), so it cannot wire
+ * them itself.
+ */
+function renderViewerToggle(
+  wrap: HTMLElement,
+  poster: HTMLElement,
+  onOpen3d: (host: HTMLElement, poster: HTMLElement, resetToPoster: () => void) => void,
+): void {
+  const toggle = wrap.createEl("button", { cls: "kstep-3d-toggle", text: "3D" });
+  toggle.setAttribute("type", "button");
+  toggle.setAttribute("aria-label", "Als 3D-Modell anzeigen");
+
+  const host = wrap.createDiv({ cls: "kstep-viewer" });
+  host.hidden = true;
+
+  const controls = wrap.createDiv({ cls: "kstep-3d-controls" });
+  controls.hidden = true;
+  const zoomIn = controls.createEl("button", { cls: "kstep-3d-zoom-in", text: "+" });
+  zoomIn.setAttribute("type", "button");
+  zoomIn.setAttribute("aria-label", "Vergrößern");
+  const zoomOut = controls.createEl("button", { cls: "kstep-3d-zoom-out", text: "−" });
+  zoomOut.setAttribute("type", "button");
+  zoomOut.setAttribute("aria-label", "Verkleinern");
+  const reset = controls.createEl("button", { cls: "kstep-3d-reset", text: "Zurücksetzen" });
+  reset.setAttribute("type", "button");
+  reset.setAttribute("aria-label", "Ansicht zurücksetzen");
+
+  let opened = false;
+
+  /**
+   * Swaps the card back to its 2D poster — the button-click "back to 2D"
+   * branch below, factored out so `Kstep3dController` (main.ts) can also
+   * call it, unprompted by a click, when this card's handle gets evicted by
+   * the plugin-wide LRU cap (see `onOpen3d`'s doc comment above). Idempotent
+   * (safe to call when already in 2D): both call sites either already
+   * checked `opened` first (the click handler) or don't need to (eviction
+   * only ever happens while a handle — and therefore the 3D view — is
+   * active).
+   */
+  function resetToPoster(): void {
+    opened = false;
+    toggle.textContent = "3D";
+    toggle.setAttribute("aria-label", "Als 3D-Modell anzeigen");
+    host.hidden = true;
+    controls.hidden = true;
+    poster.hidden = false;
+  }
+
+  toggle.addEventListener("click", () => {
+    opened = !opened;
+    if (opened) {
+      toggle.textContent = "2D";
+      toggle.setAttribute("aria-label", "Als 2D-Ansicht anzeigen");
+      poster.hidden = true;
+      host.hidden = false;
+      controls.hidden = false;
+      onOpen3d(host, poster, resetToPoster);
+    } else {
+      resetToPoster();
+    }
+  });
+}
+
+/**
+ * Error card painted INSIDE the viewer host when an async GLB mount/parse
+ * failure happens (`KStepViewer.ts`'s `mountViewer` `onAsyncError`) or when
+ * the second (`-f glb`) CLI call itself fails after the toggle was already
+ * switched to 3D. The poster/plate is left untouched — a viewer failure
+ * never takes away the 2D preview the user already had.
+ *
+ * Clears `host` first (MINOR finding, this wave's review): `main.ts`'s
+ * `Kstep3dController` re-attempts a failed open on every subsequent 3D click
+ * (its own `this.handle` guard only ever prevents re-entry once a mount has
+ * actually *succeeded*), and without this every retry stacked another error
+ * box under the previous one rather than replacing it — invisible ones piling
+ * up below the fold of the fixed-aspect-ratio viewer host (`.kstep-viewer`,
+ * `overflow: hidden` in styles.css).
+ */
+export function renderViewerError(host: HTMLElement, title: string, detail: string): void {
+  host.empty();
+  const box = host.createDiv({ cls: "kstep-viewer-error" });
+  box.createEl("strong", { cls: "kstep-error-title", text: title });
+  box.createEl("pre", { text: detail });
 }
 
 /** Neutral card for a model that has no geometry — a correct state, not a warning. */
