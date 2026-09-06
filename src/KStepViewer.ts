@@ -71,7 +71,38 @@ export function mountViewer(
   let canvas: HTMLCanvasElement;
   try {
     canvas = document.createElement("canvas");
-    renderer = new WebGLRenderer({ canvas, antialias: true, alpha: false });
+    // preserveDrawingBuffer: true matters here because this viewer has NO
+    // continuous requestAnimationFrame loop — render() only runs reactively
+    // (on load, resize, or an OrbitControls "change" event). Per the WebGL
+    // spec, without this flag the browser is permitted to clear the drawing
+    // buffer after compositing any frame where no new draw call has occurred
+    // since, which can make a static three.js canvas go blank between
+    // repaints with no error and no code-visible signal that anything went
+    // wrong.
+    //
+    // Verified concretely, but NOT inside Obsidian itself (2026-09-06):
+    // this exact renderer construction was ported near-verbatim to kstep.dev's
+    // playground (kstep-lang/kstep.dev commit 29e5565's src/lib/kstepViewer.ts),
+    // and reproduced there under Chromium — a `gl.readPixels()` taken in the
+    // same script turn as a successful render showed real shaded geometry,
+    // but a plain screenshot taken any time afterward (a separate macrotask,
+    // what an actual viewer sees) showed a blank canvas, because the drawing
+    // buffer had already been cleared in between. Obsidian's renderer process
+    // is itself Chromium (Electron), so the same WebGL spec behavior applies
+    // to the same code pattern here — but this was NOT independently
+    // reproduced live inside Obsidian for this fix: this session's sandbox
+    // runs Obsidian as a pure-Wayland client with no Xwayland window, and no
+    // Wayland-native input-injection tool (ydotool/wtype) was available to
+    // drive its UI, so a live click-through-and-wait repro was not possible
+    // here. Applying the fix anyway because it is unconditionally safe: it
+    // only changes buffer-retention behavior between paints and costs nothing
+    // in the case where Obsidian's own paint scheduling happens to avoid the
+    // symptom already. If a future investigation gets a live repro (or a
+    // counter-example) inside Obsidian itself, update this note accordingly
+    // — see test/kstep-3d-controller.test.mjs's header comment for why this
+    // file (needing a real WebGL context) stays outside plain `node:test`
+    // and has no automated regression coverage of its own to update instead.
+    renderer = new WebGLRenderer({ canvas, antialias: true, alpha: false, preserveDrawingBuffer: true });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return { ok: false, reason: `Could not create a WebGL renderer: ${msg}` };
